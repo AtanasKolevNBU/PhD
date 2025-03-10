@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import os
+import numpy as np
 
 class LSTMModel(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, output_size, device=None):
@@ -96,16 +97,37 @@ class LSTMModel(nn.Module):
             output = self(input_seq)
         return output.cpu().numpy()
 
-    def extract_features(self, input_seq):
+    def extract_features(self, input_seq, extract_device = "cpu"):
         """ Extracts LSTM hidden state as features. """
         self.eval()
-        with torch.no_grad():
-            input_seq = input_seq.to(self.device)
-            h0 = torch.zeros(self.num_layers, input_seq.size(0), self.hidden_size).to(self.device)
-            c0 = torch.zeros(self.num_layers, input_seq.size(0), self.hidden_size).to(self.device)
+        features_list = []
 
-            _, (hn, _) = self.lstm(input_seq, (h0, c0))
-        return hn[-1].cpu().numpy()  # Take the last hidden state layer
+        with torch.no_grad():
+            # If input_seq is a DataLoader, iterate over it
+            if isinstance(input_seq, torch.utils.data.DataLoader):
+                for batch in input_seq:
+                    # Handle (data, target) tuples if DataLoader returns them
+                    if isinstance(batch, (list, tuple)):
+                        batch = batch[0]  # Extract only input data
+
+                    batch = batch.to(self.device)
+                    h0 = torch.zeros(self.num_layers, batch.size(0), self.hidden_size).to(self.device)
+                    c0 = torch.zeros(self.num_layers, batch.size(0), self.hidden_size).to(self.device)
+
+                    _, (hn, _) = self.lstm(batch, (h0, c0))
+                    features_list.append(hn[-1].cpu().numpy())  # Extract last hidden state
+
+                return np.vstack(features_list)  # Stack features for all batches
+
+            else:
+                # If input_seq is already a tensor, process directly
+                input_seq = input_seq.to(extract_device)
+                h0 = torch.zeros(self.num_layers, input_seq.size(0), self.hidden_size).to(extract_device)
+                c0 = torch.zeros(self.num_layers, input_seq.size(0), self.hidden_size).to(extract_device)
+
+                _, (hn, _) = self.lstm(input_seq, (h0, c0))
+                return hn[-1].cpu().numpy()  # Extract last hidden state
+
 
     def save_model(self, file_path="lstm_model.pth"):
         """ Saves the model to a .pth file. """

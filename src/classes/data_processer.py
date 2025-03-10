@@ -9,6 +9,38 @@ class DataProcesser:
     def __init__(self):
         pass
 
+    @staticmethod
+    def prepare_tensor_for_lstm(data_series, sequence_length, device="cpu"):
+        """
+        Converts a Pandas Series into a PyTorch tensor formatted for LSTM input.
+
+        Args:
+            data_series (pd.Series): Time series data to be formatted.
+
+        Returns:
+            torch.Tensor: A tensor ready for LSTM input with shape (batch_size, seq_length, input_size).
+        """
+        if not isinstance(data_series, pd.Series):
+            raise ValueError("Input must be a Pandas Series.")
+
+        # Convert to NumPy array
+        data_np = data_series.to_numpy()
+
+        # Create overlapping sequences using a sliding window approach
+        num_samples = len(data_np) - sequence_length + 1
+        if num_samples <= 0:
+            raise ValueError(f"Sequence length {sequence_length} is too large for the data.")
+
+        tensor_data = np.array([data_np[i:i + sequence_length] for i in range(num_samples)])
+
+        # Convert to PyTorch tensor and reshape for LSTM (batch_size, seq_length, input_size)
+        tensor_data = torch.tensor(tensor_data, dtype=torch.float32).unsqueeze(-1)  # Add input_size dimension
+
+        # Move tensor to the correct device
+        tensor_data = tensor_data.to(device)
+
+        return tensor_data
+
     def normalize_series(self, series, distribution = 'lognorm'):
 
         if distribution == 'lognorm':

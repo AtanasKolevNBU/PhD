@@ -3,6 +3,9 @@ import torch.nn as nn
 import torch.optim as optim
 import os
 import numpy as np
+from codecarbon import EmissionsTracker
+import pynvml
+import time
 
 class LSTMModel(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, output_size, device=None):
@@ -88,6 +91,123 @@ class LSTMModel(nn.Module):
 
         print("Training complete!")
         return self
+    
+    def train_lstm_and_track_time_and_efficiency(self, train_loader, val_loader, num_epochs=20, learning_rate=0.001):
+        """
+        Trains the LSTM model using train and validation DataLoaders, while tracking
+        training time and energy consumption.
+
+        Args:
+            train_loader: DataLoader for training data.
+            val_loader: DataLoader for validation data.
+            num_epochs: Number of epochs to train.
+            learning_rate: Learning rate for optimizer.
+
+        Returns:
+            Trained model with best validation performance.
+        """
+        
+        self.to(self.device)
+        criterion = nn.MSELoss()
+        optimizer = optim.Adam(self.parameters(), lr=learning_rate)
+        
+        best_val_loss = float("inf")
+        patience = 3  # Early stopping patience
+        no_improve = 0
+        # Start tracking system-wide energy consumption (optional)
+        tracker = EmissionsTracker()
+        tracker.start()
+        try:
+
+            # Start tracking time
+            start_time = time.time()
+            
+            # Initialize NVIDIA energy tracking
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)  # Assume single GPU
+
+            cumulative_energy_joules = 0  # Cumulative energy in Joules
+            cum_energy_joules = [0]
+            epoch_cumulative_times = 0
+            epoch_times = []
+
+            for epoch in range(num_epochs):
+                epoch_start_time = time.time()  # Track time per epoch
+
+                # Training Phase
+                self.train()
+                total_train_loss = 0
+
+                for data, target in train_loader:
+                    data, target = data.to(self.device), target.to(self.device)
+
+                    optimizer.zero_grad()
+                    output = self(data)
+                    loss = criterion(output, target)
+                    loss.backward()
+                    optimizer.step()
+
+                    total_train_loss += loss.item()
+
+                avg_train_loss = total_train_loss / len(train_loader)
+
+                # Validation Phase
+                self.eval()
+                total_val_loss = 0
+                with torch.no_grad():
+                    for data, target in val_loader:
+                        data, target = data.to(self.device), target.to(self.device)
+                        output = self(data)
+                        loss = criterion(output, target)
+                        total_val_loss += loss.item()
+
+                avg_val_loss = total_val_loss / len(val_loader)
+
+                # Calculate Power Draw for the epoch
+                epoch_end_time = time.time()
+                epoch_time = epoch_end_time - epoch_start_time  # Time in seconds
+                epoch_cumulative_times += epoch_time
+                epoch_times.append(epoch_cumulative_times)
+
+                power_draw = int(pynvml.nvmlDeviceGetPowerUsage(handle))
+                print(power_draw)
+                power_draw_watts = power_draw / 1000.0  # Convert mW to W
+                energy_used_joules = power_draw_watts * epoch_time  # Energy in Joules
+                cumulative_energy_joules += energy_used_joules  # Accumulate over epochs
+                cum_energy_joules.append(cumulative_energy_joules)
+
+                print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, "
+                    f"Val Loss: {avg_val_loss:.4f}, Energy Used: {energy_used_joules:.2f} J")
+
+                # Early Stopping
+                if avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
+                    no_improve = 0
+                    self.save_model("best_lstm_model_EE.pth")  # Save best model
+                else:
+                    no_improve += 1
+                    if no_improve >= patience:
+                        print("Early stopping triggered.")
+                        break
+
+            # End tracking system-wide energy
+            tracker.stop()
+
+            # End time tracking
+            end_time = time.time()
+            total_time = end_time - start_time  # Total training time
+
+            # Print cumulative energy consumption
+            print(f"Training complete! Time to converge: {total_time:.2f} seconds")
+            print(f"Cumulative GPU Energy Used: {cumulative_energy_joules:.2f} Joules")
+
+            return self, epoch_times, cum_energy_joules
+        except Exception as e:
+            tracker.stop()
+            print(e)
+
+            return None, None, None
+
 
     def forecast(self, input_seq):
         """ Forecast the next value based on input sequence. """

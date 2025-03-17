@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 
 from sklearn.metrics import f1_score, roc_auc_score, accuracy_score, recall_score, precision_score
 from sklearn.model_selection import train_test_split
@@ -58,3 +59,8 @@ def train_and_predict_xgbc(X_train, y_train, X_test):
     y_test_pred = xgbc.predict_proba(X_test)[:, 1]
 
     return y_train_pred, y_test_pred
+
+def confusion_matrix(y_test, y_pred):
+    tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
+    return pd.DataFrame({'Predicted Positive' : [tp, fp],
+              'Predicted Negative' : [fn, tn]}, index = ['Measured Positive', 'Measured Negative'])

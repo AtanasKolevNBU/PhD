@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, minmax_scale
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -48,7 +48,7 @@ class DataProcesser:
         else:
             raise NotImplementedError('Method not yet implemented!')
 
-    def prepare_autoregressive_data(self, series, window_size=10, stride=1, train_ratio=0.7, val_ratio=0.15, batch_size=32, test=False):
+    def prepare_autoregressive_data(self, series, window_size=10, stride=1, train_ratio=0.7, val_ratio=0.15, batch_size=32, test=False, scaler_method = 'standard'):
         """
         Converts a time series into supervised learning format (X, y) and splits it into train, validation, and test sets.
         
@@ -71,9 +71,16 @@ class DataProcesser:
                 DataLoader: Test DataLoader.
                 StandardScaler: The fitted scaler.
         """
-        # Normalize series using StandardScaler
-        scaler = StandardScaler()
-        series_scaled = scaler.fit_transform(series.values.reshape(-1, 1))
+        if scaler_method == 'standard':
+            # Normalize series using StandardScaler
+            scaler = StandardScaler()
+            series_scaled = scaler.fit_transform(series.values.reshape(-1, 1))
+        elif scaler_method == 'minmax':
+            # Scale series using minmax_scale
+            scaler = None
+            series_scaled = minmax_scale(series.values.reshape(-1, 1))
+        else:
+            raise NotImplemented(f"{scaler} method is not yet implemented!")
         series_tensor = torch.tensor(series_scaled, dtype=torch.float32)
 
         # Create input-target pairs using sliding window

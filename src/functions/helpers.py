@@ -58,7 +58,7 @@ def train_and_predict_xgbc(X_train, y_train, X_test):
     y_train_pred = xgbc.predict_proba(X_train)[:, 1]
     y_test_pred = xgbc.predict_proba(X_test)[:, 1]
 
-    return y_train_pred, y_test_pred
+    return y_train_pred, y_test_pred, xgbc
 
 def confusion_matrix(y_test, y_pred):
     tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()

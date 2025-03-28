@@ -3,6 +3,10 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler, minmax_scale
 import torch
 from torch.utils.data import DataLoader, TensorDataset
+from statsmodels.tsa.seasonal import STL
+import scipy.stats as stats
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import QuantileTransformer
 
 
 class DataProcesser:
@@ -127,3 +131,38 @@ class DataProcesser:
         train_loader, val_loader, test_loader, scaler = self.prepare_autoregressive_data(df[series_name])
 
         return df, train_loader, val_loader, test_loader, scaler
+    
+class SignalProcesser:
+
+    def __init__(self):
+        pass
+
+    def detrend(self, signal, period, method = 'stl'):
+
+        if method.lower() == 'stl':
+            stl = STL(signal, period = period)
+            res = stl.fit()
+            detrended_signal = signal - res.trend
+        elif method.lower() == 'differencing':
+            detrended_signal = np.diff(signal)
+        else:
+            raise NotImplementedError(f"Method: {method} is not yet implemented!")
+
+        return detrended_signal
+    
+    def log_transform(self, signal):
+
+        signal_log = np.log(signal[signal > 0]) # avoid log(0)
+
+        return signal_log
+    
+    def check_normality_plot(self, signal):
+        
+        stats.probplot(signal, dist = "norm", plot = plt)
+
+    def quantile_transformation(self, signal):
+
+        qt = QuantileTransformer(output_distribution='normal')
+        data_normalized = qt.fit_transform(signal.reshape(-1, 1)).flatten()
+
+        return data_normalized

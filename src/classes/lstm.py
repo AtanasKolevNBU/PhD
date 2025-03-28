@@ -6,6 +6,7 @@ import numpy as np
 from codecarbon import EmissionsTracker
 import pynvml
 import time
+from sklearn.metrics import mean_squared_error, r2_score
 
 class LSTMModel(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, output_size, device=None):
@@ -26,7 +27,7 @@ class LSTMModel(nn.Module):
         out = self.fc(out[:, -1, :])  # Take last time step output
         return out
 
-    def train_lstm(self, train_loader, val_loader, num_epochs=20, learning_rate=0.001):
+    def train_lstm(self, train_loader, val_loader, num_epochs=20, learning_rate=0.001, channel = '1'):
         """
         Trains the LSTM model using train and validation DataLoaders.
 
@@ -44,9 +45,10 @@ class LSTMModel(nn.Module):
         optimizer = optim.Adam(self.parameters(), lr=learning_rate)
         
         best_val_loss = float("inf")
-        patience = 3  # Early stopping patience
+        patience = 5  # Early stopping patience
         no_improve = 0
-
+        history = {'train_loss' : [],
+                   'val_loss' : []}
         for epoch in range(num_epochs):
             # Training Phase
             self.train()
@@ -77,20 +79,23 @@ class LSTMModel(nn.Module):
 
             avg_val_loss = total_val_loss / len(val_loader)
             print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
+            history['train_loss'].append(avg_train_loss)
+            history['val_loss'].append(avg_val_loss)
 
             # Early Stopping
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 no_improve = 0
-                self.save_model("best_lstm_model.pth")  # Save best model
             else:
                 no_improve += 1
                 if no_improve >= patience:
                     print("Early stopping triggered.")
+                    # Save best model
+                    self.save_model(f"best_lstm_model_channel_{channel}.pth")
                     break
 
         print("Training complete!")
-        return self
+        return self, history
     
     def train_lstm_and_track_time_and_efficiency(self, train_loader, val_loader, num_epochs=20, learning_rate=0.001):
         """
@@ -247,6 +252,34 @@ class LSTMModel(nn.Module):
 
                 _, (hn, _) = self.lstm(input_seq, (h0, c0))
                 return hn[-1].cpu().numpy()  # Extract last hidden state
+            
+    def evaluate(model, test_loader, method = 'regression'):
+
+        # Set model to evaluation mode
+        model.eval()
+
+        # Track predictions and ground truths
+        all_preds = []
+        all_targets = []
+
+        # No gradient computation during evaluation
+        with torch.no_grad():
+            for batch in test_loader:
+                inputs, targets = batch  # Assumes batch is (X, y)
+                outputs = model(inputs)  # Forward pass
+                all_preds.append(outputs)
+                all_targets.append(targets)
+
+        # Concatenate all batches
+        all_preds = torch.cat(all_preds).cpu().numpy()
+        all_targets = torch.cat(all_targets).cpu().numpy()
+
+        if method == 'regression':
+            mse = mean_squared_error(all_targets, all_preds)
+            r2 = r2_score(all_targets, all_preds)
+            print(f"MSE: {mse:.4f}, R²: {r2:.4f}")
+        else:
+            raise NotImplementedError(f"Method: {method} not yet implemented!")
 
 
     def save_model(self, file_path="lstm_model.pth"):

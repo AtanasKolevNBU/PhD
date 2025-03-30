@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from sklearn.metrics import f1_score, roc_auc_score, accuracy_score, recall_score, precision_score
+from sklearn.metrics import f1_score, roc_auc_score, accuracy_score, recall_score, precision_score, roc_curve
 from sklearn.model_selection import train_test_split
 
 import matplotlib.pyplot as plt
@@ -64,3 +64,13 @@ def confusion_matrix(y_test, y_pred):
     tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
     return pd.DataFrame({'Predicted Positive' : [tp, fp],
               'Predicted Negative' : [fn, tn]}, index = ['Measured Positive', 'Measured Negative'])
+
+def calculate_roc(y_true, y_pred):
+
+    y_train, y_test = y_true
+    y_pred_train, y_pred_test = y_pred
+
+    fpr_train, tpr_train, _ = roc_curve(y_train, y_pred_train)
+    fpr_test, tpr_test, thr = roc_curve(y_test, y_pred_test)
+
+    return (fpr_train, tpr_train), (fpr_test, tpr_test), thr

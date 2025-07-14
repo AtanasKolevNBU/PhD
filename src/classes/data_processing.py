@@ -124,6 +124,87 @@ class DataProcesser:
 
         return train_loader, val_loader, test_loader, scaler
     
+    def prepare_autoencoder_data(self, series, window_size=10, stride=1, train_ratio=0.7, val_ratio=0.15, batch_size=32, test=False, scaler_method='standard'):
+        """
+        Prepares time series data for LSTM Autoencoder training, where X == Y (reconstruction task).
+
+        Args:
+            series (pd.Series): Time series data.
+            window_size (int): Length of each input sequence.
+            stride (int): Step size for sliding window.
+            train_ratio (float): Fraction of data used for training.
+            val_ratio (float): Fraction of data used for validation.
+            batch_size (int): Size of batches in DataLoader.
+            test (bool): If True, returns only the test set.
+            scaler_method (str): 'standard' or 'minmax' scaling.
+
+        Returns:
+            If test=True:
+                test_loader, scaler
+            Else:
+                train_loader, val_loader, test_loader, scaler
+        """
+        from sklearn.preprocessing import StandardScaler, minmax_scale
+        import torch
+        from torch.utils.data import TensorDataset, DataLoader
+
+        # Scale the series
+        if scaler_method == 'standard':
+            scaler = StandardScaler()
+            if len(series.shape) == 2:
+                print(series.shape)
+                series_scaled = scaler.fit_transform(series.values)
+            else:
+                series_scaled = scaler.fit_transform(series.values.reshape(-1, 1))
+        elif scaler_method == 'minmax':
+            scaler = None
+            if len(series.shape) == 2:
+                series_scaled = minmax_scale(series.values)
+            else:
+                series_scaled = minmax_scale(series.values.reshape(-1, 1))
+        else:
+            raise NotImplementedError(f"{scaler_method} method is not yet implemented!")
+
+        series_tensor = torch.tensor(series_scaled, dtype=torch.float32)
+
+        # Extract sequences
+        X = []
+        for i in range(0, len(series_tensor) - window_size + 1, stride):
+            window = series_tensor[i:i + window_size]
+            X.append(window)
+
+        X_tensor = torch.stack(X)  # shape: (n_samples, window_size, 1)
+
+        # Autoencoder target is same as input
+        Y_tensor = X_tensor.clone()
+
+        if test:
+            test_dataset = TensorDataset(X_tensor, Y_tensor)
+            test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+            return None, None, test_loader, scaler
+
+        # Split indices
+        total_samples = X_tensor.shape[0]
+        train_end = int(train_ratio * total_samples)
+        val_end = train_end + int(val_ratio * total_samples)
+
+        # Split sets
+        X_train, Y_train = X_tensor[:train_end], Y_tensor[:train_end]
+        X_val, Y_val = X_tensor[train_end:val_end], Y_tensor[train_end:val_end]
+        X_test, Y_test = X_tensor[val_end:], Y_tensor[val_end:]
+
+        # Build datasets
+        train_dataset = TensorDataset(X_train, Y_train)
+        val_dataset = TensorDataset(X_val, Y_val)
+        test_dataset = TensorDataset(X_test, Y_test)
+
+        # Build loaders
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+        return train_loader, val_loader, test_loader, scaler
+    
     def process_ICE_data(self, df: pd.DataFrame, series_name: list[str]):
         
         for series in series_name:

@@ -44,21 +44,27 @@ class HHT_FeatureExtraction:
         return float(np.median(A[j0:j1+1]))
 
     def hht_feature_vector(self, result: Dict, fs: float,
-                        t: Optional[np.ndarray] = None,
-                        edge_trim: float = 0.02,
-                        fmax: Optional[float] = None,
-                        band_edges: Optional[List[Tuple[float,float]]] = None,
-                        fault_freqs: Optional[Dict[str, float]] = None,
-                        resonant_select: str = "top_energy",
-                        resonant_k: int = 2) -> Tuple[np.ndarray, List[str]]:
+                       t: Optional[np.ndarray] = None,
+                       edge_trim: float = 0.02,
+                       fmax: Optional[float] = None,
+                       band_edges: Optional[List[Tuple[float,float]]] = None,
+                       fault_freqs: Optional[Dict[str, float]] = None,
+                       resonant_select: str = "top_energy",
+                       resonant_k: int = 2,
+                       k_target: Optional[int] = None   # <--- NEW
+                       ) -> Tuple[np.ndarray, List[str]]:
         """
         Build an HHT feature vector from:
         result['imfs'], result['amplitude'], result['frequency'], result['residual'].
         Returns (X, feature_names).
         """
+        
         imfs: List[np.ndarray] = result["imfs"]
         amp  = result["amplitude"]      # (K, N)
         freq = result["frequency"]      # (K, N)
+        K = len(imfs)
+        if k_target is None:
+            k_target = K  # default: keep current behavior
 
         if len(imfs) == 0:
             return np.zeros(1), ["empty_hht"]
@@ -124,6 +130,13 @@ class HHT_FeatureExtraction:
             aw_center[k] = f_mean
             feats += [Ek, Ek/(total_energy)]
             names += [f"imf{k+1}_Hilbert_energy", f"imf{k+1}_energy_frac"]
+        if k_target > K:
+            base_names = ["rms","crest","kurt","skew","zcr",
+                        "amp_mean","amp_std","amp_p95","f_mean","f_std",
+                        "Hilbert_energy","energy_frac"]
+            for k in range(K, k_target):
+                feats += [0.0]*12
+                names += [f"imf{k+1}_{nm}" for nm in base_names]
 
         # ---------- Global Hilbert spectrum features ----------
         # Marginal spectrum via histogram
@@ -186,13 +199,14 @@ class HHT_FeatureExtraction:
                     names += [f"{key}_amp", f"{key}_2x_amp", f"{key}_snr"]
         return np.array(feats, dtype=float), names
     
-    def windowed_hht_table(self, x, fs, win_s=0.2, step_s=0.05):
+    def windowed_hht_table(self, x, fs, win_s=0.2, step_s=0.05, k_target=6):
         L = int(round(win_s*fs)); S = int(round(step_s*fs))
-        rows = []
+        if L < 300:  # ~0.094 s at 3.2 kHz
+            raise ValueError(f"win_s={win_s}s gives only {L} samples; increase win_s for fs={fs} Hz.")
+        rows, names = [], None
         for i in range(0, len(x)-L+1, S):
             seg = x[i:i+L]
-            res = hht.transform(seg, fs)          # HHT per window
-            feats, names = self.hht_feature_vector(res, fs)  # ~85 features
+            res = hht.transform(seg, fs)
+            feats, names = self.hht_feature_vector(res, fs, k_target=k_target, fmax=0.45*fs)
             rows.append(feats)
-        X = np.vstack(rows)        # shape: n_windows × ~85
-        return X, names
+        return np.vstack(rows), names

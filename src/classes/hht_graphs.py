@@ -101,8 +101,8 @@ def plot_imfs_compare(x1, t1, imfs1, res1,
             ax.plot(t1, res1, alpha=0.9, lw=0.9, color="C0")
         if res2 is not None:
             ax.plot(t2, res2, alpha=0.9, lw=0.9, color="C1")
-        ax.set_ylabel("residual")
-        ax.set_xlabel("time [s]")
+        ax.set_ylabel("Остатък")
+        ax.set_xlabel("Време, s")
 
     fig.tight_layout()
     plt.show()
@@ -148,7 +148,7 @@ def plot_instfreq_compare(t1, freq1, amp1,
         if k == 0:
             ax.legend(loc="upper right")
 
-    axs[-1].set_xlabel("time [s]")
+    axs[-1].set_xlabel("Време, s")
     fig.suptitle(title)
     fig.tight_layout()
     plt.show()
@@ -194,7 +194,7 @@ def plot_hilbert_scatter_compare(t1, freq1, amp1,
     for sc in (sc1, sc2):
         sc.set_clim(vmin=vmin, vmax=vmax)
     cbar = fig.colorbar(sc2, ax=axs.ravel().tolist(), location = 'right')
-    cbar.set_label("amplitude")
+    cbar.set_label("Амплитуда")
     fig.suptitle(title)
     fig.tight_layout()
     plt.show()
@@ -298,8 +298,8 @@ def plot_marginal_spectrum_compare(freq1, amp1, t1,
     plt.figure(figsize=(10, 4))
     plt.plot(F, H1, label=labels[0], lw=1.2, color="C0")
     plt.plot(F, H2, label=labels[1], lw=1.2, color="C1")
-    plt.xlabel("frequency [Hz]")
-    plt.ylabel(f"∫ amplitude^{power} dt")
+    plt.xlabel("Честота, Hz")
+    plt.ylabel(f"∫ Амплитуда^{power} dt")
     plt.title(title)
     plt.legend()
     plt.tight_layout()

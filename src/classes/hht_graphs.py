@@ -72,40 +72,74 @@ def _zero_crossings(h: np.ndarray) -> int:
 # =========================
 # 1) IMFs + residual (overlay)
 # =========================
-def plot_imfs_compare(x1, t1, imfs1, res1,
+def plot_imfs_compare_three(x1, t1, imfs1, res1,
                       x2, t2, imfs2, res2,
-                      labels=("A","B"), title="IMFs comparison (overlay)"):
-    K = max(len(imfs1), len(imfs2))
-    rows = K + 1 + int(res1 is not None or res2 is not None)
+                      x3=None, t3=None, imfs3=None, res3=None,
+                      labels=("A","B","C"),
+                      title="IMFs comparison (overlay)"):
+    """
+    Overlay plot of up to three signals, their IMFs, and residuals.
+    xk, tk: time-domain signals (arrays)
+    imfsk: list/array of IMFs [IMF1, IMF2, ...]
+    resk: residual (array) or None
+    """
+
+    # Normalize None -> empty lists for uniform handling
+    imfs1 = imfs1 or []
+    imfs2 = imfs2 or []
+    imfs3 = imfs3 or []
+
+    have3 = (x3 is not None) and (t3 is not None) and (len(imfs3) > 0 or res3 is not None)
+
+    # Number of IMF rows = max count among provided sets
+    K = max(len(imfs1), len(imfs2), len(imfs3) if have3 else 0)
+
+    # One row for original signals + K IMF rows + residual row if any residual exists
+    any_residual = (res1 is not None) or (res2 is not None) or (res3 is not None if have3 else False)
+    rows = 1 + K + int(any_residual)
 
     fig, axs = plt.subplots(rows, 1, figsize=(11, 1.6*rows), sharex=False)
     axs = np.atleast_1d(axs)
 
+    # 0) originals overlay
     axs[0].plot(t1, x1, label=labels[0], alpha=0.8, lw=1.0, color="C0")
     axs[0].plot(t2, x2, label=labels[1], alpha=0.8, lw=1.0, color="C1")
-    axs[0].set_ylabel("x(t)")
-    axs[0].set_title(title)
-    axs[0].legend(loc="upper right")
+    if have3:
+        axs[0].plot(t3, x3, label=labels[2], alpha=0.8, lw=1.0, color="C2")
 
+    axs[0].set_ylabel("x(t)", fontsize=16)
+    axs[0].set_title(title, fontsize=18)
+    axs[0].legend(loc="upper right")
+    axs[0].tick_params(axis='both', labelsize=14)
+
+    # 1) IMFs
     for i in range(K):
         ax = axs[i+1]
         if i < len(imfs1):
             ax.plot(t1, imfs1[i], alpha=0.9, lw=0.9, color="C0")
         if i < len(imfs2):
             ax.plot(t2, imfs2[i], alpha=0.9, lw=0.9, color="C1")
-        ax.set_ylabel(f"IMF {i+1}")
+        if have3 and i < len(imfs3):
+            ax.plot(t3, imfs3[i], alpha=0.9, lw=0.9, color="C2")
+        ax.set_ylabel(f"IMF {i+1}", fontsize=16)
+        ax.tick_params(axis='both', labelsize=14)
 
-    if res1 is not None or res2 is not None:
+    # 2) Residuals (last row if present)
+    if any_residual:
         ax = axs[-1]
         if res1 is not None:
             ax.plot(t1, res1, alpha=0.9, lw=0.9, color="C0")
         if res2 is not None:
             ax.plot(t2, res2, alpha=0.9, lw=0.9, color="C1")
-        ax.set_ylabel("Остатък")
-        ax.set_xlabel("Време, s")
+        if have3 and res3 is not None:
+            ax.plot(t3, res3, alpha=0.9, lw=0.9, color="C2")
+        ax.set_ylabel("Остатък", fontsize=16)
+        ax.set_xlabel("Време, s", fontsize=16)
+        ax.tick_params(axis='both', labelsize=14)
 
     fig.tight_layout()
     plt.show()
+
 
 
 # =====================================
@@ -113,17 +147,31 @@ def plot_imfs_compare(x1, t1, imfs1, res1,
 # =====================================
 def plot_instfreq_compare(t1, freq1, amp1,
                           t2, freq2, amp2,
-                          fmax=None, labels=("A","B"),
+                          t3=None, freq3=None, amp3=None,
+                          fmax=None, labels=("A","B","C"),
                           title="Instantaneous frequency (compare)"):
-    K = max(freq1.shape[0] if freq1.size else 0,
-            freq2.shape[0] if freq2.size else 0)
+    """
+    Overlay instantaneous frequencies per-IMF for up to three signals.
+    freq*, amp* are shaped (n_imfs, n_samples). t* is (n_samples,).
+    """
+
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    # Helper to get number of IMFs safely
+    def _n_imfs(freq):
+        return (freq.shape[0] if (freq is not None and getattr(freq, "size", 0)) else 0)
+
+    K = max(_n_imfs(freq1), _n_imfs(freq2), _n_imfs(freq3))
+
     fig, axs = plt.subplots(K, 1, figsize=(11, 1.4*K), sharex=False)
     axs = np.atleast_1d(axs)
 
     def _mask(freq, amp):
-        if freq.size == 0:
+        if freq is None or getattr(freq, "size", 0) == 0:
             return []
-        thr = np.percentile(amp, 20, axis=1)  # per-IMF threshold
+        # per-IMF amplitude threshold (20th percentile)
+        thr = np.percentile(amp, 20, axis=1)
         masks = []
         for k in range(freq.shape[0]):
             m = np.isfinite(freq[k])
@@ -133,23 +181,35 @@ def plot_instfreq_compare(t1, freq1, amp1,
             masks.append(m)
         return masks
 
-    m1 = _mask(freq1, amp1) if freq1.size else []
-    m2 = _mask(freq2, amp2) if freq2.size else []
+    m1 = _mask(freq1, amp1) if _n_imfs(freq1) else []
+    m2 = _mask(freq2, amp2) if _n_imfs(freq2) else []
+    m3 = _mask(freq3, amp3) if _n_imfs(freq3) else []
 
     for k in range(K):
         ax = axs[k]
-        if k < (freq1.shape[0] if freq1.size else 0):
+        # series 1
+        if k < _n_imfs(freq1):
             f = np.clip(freq1[k], 0, fmax) if fmax is not None else freq1[k]
-            ax.plot(t1[m1[k]], f[m1[k]], lw=0.9, alpha=0.9, color="C0", label=(labels[0] if k==0 else None))
-        if k < (freq2.shape[0] if freq2.size else 0):
+            ax.plot(t1[m1[k]], f[m1[k]], lw=0.9, alpha=0.9, color="C0",
+                    label=(labels[0] if k == 0 else None))
+        # series 2
+        if k < _n_imfs(freq2):
             f = np.clip(freq2[k], 0, fmax) if fmax is not None else freq2[k]
-            ax.plot(t2[m2[k]], f[m2[k]], lw=0.9, alpha=0.9, color="C1", label=(labels[1] if k==0 else None))
-        ax.set_ylabel(f"IMF{k+1} f [Hz]")
+            ax.plot(t2[m2[k]], f[m2[k]], lw=0.9, alpha=0.9, color="C1",
+                    label=(labels[1] if k == 0 else None))
+        # series 3 (optional)
+        if k < _n_imfs(freq3):
+            f = np.clip(freq3[k], 0, fmax) if fmax is not None else freq3[k]
+            ax.plot(t3[m3[k]], f[m3[k]], lw=0.9, alpha=0.9, color="C2",
+                    label=(labels[2] if k == 0 else None))
+
+        ax.set_ylabel(f"IMF{k+1} f [Hz]", fontsize=16)
         if k == 0:
             ax.legend(loc="upper right")
+        ax.tick_params(axis='both', labelsize=14)
 
-    axs[-1].set_xlabel("Време, s")
-    fig.suptitle(title)
+    axs[-1].set_xlabel("Време, s", fontsize=16)
+    fig.suptitle(title, fontsize=16)
     fig.tight_layout()
     plt.show()
 
@@ -266,11 +326,20 @@ def plot_hilbert_energy_map_compare(t1, freq1, amp1,
 # ==========================================
 def plot_marginal_spectrum_compare(freq1, amp1, t1,
                                    freq2, amp2, t2,
+                                   freq3=None, amp3=None, t3=None,
                                    fmax=None, nbins_f=800, power=2.0,
-                                   labels=("A","B"),
+                                   labels=("A","B","C"),
                                    title="Marginal Hilbert spectrum"):
+    """
+    Plot marginal Hilbert spectrum for up to three signals.
+    freq*, amp*, t* must align: freq, amp shape (n_imfs, n_samples), t shape (n_samples,).
+    """
+
+    import numpy as np
+    import matplotlib.pyplot as plt
+
     def _marginal(f, a, t):
-        if f.size == 0:
+        if f is None or a is None or t is None or getattr(f, "size", 0) == 0:
             return np.array([]), np.array([])
         dt = np.median(np.diff(t))
         F = f.ravel()
@@ -279,31 +348,48 @@ def plot_marginal_spectrum_compare(freq1, amp1, t1,
         if fmax is not None:
             M &= (F <= fmax)
         F, W = F[M], W[M]
-        H, edges = np.histogram(F, bins=nbins_f, range=(0, fmax if fmax else F.max()), weights=W)
+        if F.size == 0:
+            return np.array([]), np.array([])
+        H, edges = np.histogram(F, bins=nbins_f,
+                                range=(0, fmax if fmax else F.max()),
+                                weights=W)
         Fm = 0.5*(edges[:-1] + edges[1:])
         return Fm, H
 
+    # Compute marginal spectra
     F1, H1 = _marginal(freq1, amp1, t1)
     F2, H2 = _marginal(freq2, amp2, t2)
+    F3, H3 = _marginal(freq3, amp3, t3) if freq3 is not None else (np.array([]), np.array([]))
+
     if F1.size == 0 or F2.size == 0:
         print("Nothing to plot (check inputs).")
         return
 
-    F = F1 if F1.size <= F2.size else F2  # simple alignment
-    if F.size != F1.size:  # trim for overlay
-        H1 = np.interp(F, F1, H1)
-    if F.size != F2.size:
-        H2 = np.interp(F, F2, H2)
+    # Choose reference frequency axis = longest one
+    F = max([F1, F2, F3], key=lambda arr: arr.size)
 
+    # Align spectra for overlay
+    if F.size != F1.size and F1.size > 0:
+        H1 = np.interp(F, F1, H1)
+    if F.size != F2.size and F2.size > 0:
+        H2 = np.interp(F, F2, H2)
+    if F3.size > 0 and F.size != F3.size:
+        H3 = np.interp(F, F3, H3)
+
+    # Plot
     plt.figure(figsize=(10, 4))
     plt.plot(F, H1, label=labels[0], lw=1.2, color="C0")
     plt.plot(F, H2, label=labels[1], lw=1.2, color="C1")
-    plt.xlabel("Честота, Hz")
-    plt.ylabel(f"∫ Амплитуда^{power} dt")
-    plt.title(title)
+    if F3.size > 0:
+        plt.plot(F, H3, label=labels[2], lw=1.2, color="C2")
+
+    plt.xlabel("Честота, Hz", fontsize=16)
+    plt.ylabel(f"∫ Амплитуда^{power} dt", fontsize=16)
+    plt.title(title, fontsize=16)
     plt.legend()
     plt.tight_layout()
     plt.show()
+
 
 class EMD:
     """

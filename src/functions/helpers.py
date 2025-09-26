@@ -52,7 +52,7 @@ def plot_roc(roc_train, roc_test, roc_bm = None):
 
 def train_and_predict_xgbc(X_train, y_train, X_test):
 
-    xgbc = XGBClassifier()
+    xgbc = XGBClassifier(n_jobs = 1)
 
     xgbc.fit(X_train, y_train)
     y_train_pred = xgbc.predict_proba(X_train)[:, 1]

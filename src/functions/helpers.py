@@ -33,21 +33,21 @@ def plot_roc(roc_train, roc_test, roc_bm = None):
     fpr_test, tpr_test = roc_test
 
     if roc_bm is None:
-        plt.plot(fpr_train, tpr_train, color = 'b', label = 'Train ROC')
-        plt.plot(fpr_test, tpr_test, alpha = 0.75, color = 'r', label = 'Test ROC')
-        plt.plot(fpr_train, fpr_train, color = 'y', label = 'Random Model ROC')
-        plt.xlabel('FPR')
-        plt.ylabel('TPR')
-        plt.title("ROC Curve Train/Test/Random Model")
+        plt.plot(fpr_train, tpr_train, color = 'b', label = 'Тренировъчен ROC')
+        plt.plot(fpr_test, tpr_test, alpha = 0.75, color = 'r', label = 'Тестов ROC')
+        plt.plot(fpr_train, fpr_train, color = 'y', label = 'ROC на случаен модел')
+        plt.xlabel('Дял на фалшивите положителни', fontsize=16)
+        plt.ylabel('Чувствителност', fontsize=16)
+        plt.title("ROC функция", fontsize=16)
         plt.legend()
     else:
         fpr_bm, tpr_bm = roc_bm
-        plt.plot(fpr_train, tpr_train, color = 'b', label = 'Train ROC')
-        plt.plot(fpr_test, tpr_test, alpha = 0.75, color = 'r', label = 'Test ROC')
-        plt.plot(fpr_bm, tpr_bm, color = 'y', label = 'Best Model ROC')
-        plt.xlabel('FPR')
-        plt.ylabel('TPR')
-        plt.title("ROC Curve Train/Test/Best Model")
+        plt.plot(fpr_train, tpr_train, color = 'b', label = 'Тренировъчен ROC')
+        plt.plot(fpr_test, tpr_test, alpha = 0.75, color = 'r', label = 'Тестов ROC')
+        plt.plot(fpr_bm, tpr_bm, color = 'y', label = 'ROC на най-добър модел досега')
+        plt.xlabel('Дял на фалшивите положителни')
+        plt.ylabel('Чувствителност')
+        plt.title("ROC функция на Тренировъчни/Тестови данни и най-добър модел досега")
         plt.legend()
 
 def train_and_predict_xgbc(X_train, y_train, X_test):

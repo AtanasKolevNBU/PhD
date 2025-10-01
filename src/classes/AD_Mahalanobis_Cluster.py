@@ -25,7 +25,7 @@ class PCAMahalanobisConfig:
     # Covariance
     robust: bool = True
 
-    # Threshold labeling (used when cluster_mode='threshold')
+    # Threshold labeling (used for threshold mode and as fallback)
     q_ok: float = 0.90
     q_warn: float = 0.99
 
@@ -67,6 +67,12 @@ class PCAMahalanobisClassifier:
         self.kmeans_: Optional[KMeans] = None
         self.kmeans_label_map_: Optional[dict] = None  # raw_cluster_label -> {'OK','Warning','Error'}
 
+        # caches for fallback threshold computation
+        self._Z_all_fit_cache_: Optional[np.ndarray] = None
+        self._d2_all_fit_cache_: Optional[np.ndarray] = None
+        self._baseline_mask_fit_cache_: Optional[np.ndarray] = None
+
+    # -------------------- helpers --------------------
     def _select_feature_cols(self, df: pd.DataFrame) -> list:
         if self.config.feature_cols is not None:
             return list(self.config.feature_cols)
@@ -116,13 +122,16 @@ class PCAMahalanobisClassifier:
         return np.clip(d2, 0.0, None)
 
     def _set_thresholds(self, d2_baseline: np.ndarray):
-        if self.config.cluster_mode == "threshold":
-            if _HAVE_SCIPY:
-                self.t_ok_ = float(chi2.ppf(self.config.q_ok, df=self.k_))
-                self.t_warn_ = float(chi2.ppf(self.config.q_warn, df=self.k_))
-            else:
-                self.t_ok_ = float(np.quantile(d2_baseline, self.config.q_ok))
-                self.t_warn_ = float(np.quantile(d2_baseline, self.config.q_warn))
+        """
+        Always compute thresholds so that threshold fallback is safe even in kmeans mode.
+        """
+        if _HAVE_SCIPY:
+            self.t_ok_ = float(chi2.ppf(self.config.q_ok,   df=self.k_))
+            self.t_warn_ = float(chi2.ppf(self.config.q_warn, df=self.k_))
+        else:
+            # empirical fallback from baseline distances
+            self.t_ok_ = float(np.quantile(d2_baseline, self.config.q_ok))
+            self.t_warn_ = float(np.quantile(d2_baseline, self.config.q_warn))
 
     def _fit_kmeans(self, Z_all: np.ndarray, d2_all: np.ndarray, baseline_mask: np.ndarray):
         # Prepare non-baseline training view
@@ -130,6 +139,8 @@ class PCAMahalanobisClassifier:
         if nb.sum() < 3:
             # Too few samples; fall back to thresholding
             self.config.cluster_mode = "threshold"
+            self.kmeans_ = None
+            self.kmeans_label_map_ = None
             return
 
         if self.config.kmeans_space == "distance":
@@ -147,19 +158,24 @@ class PCAMahalanobisClassifier:
         # Map raw clusters -> OK/Warning/Error by mean MD^2 per cluster (ascending)
         cluster_ids = np.unique(km.labels_)
         means = []
+        d2_nb = d2_all[nb]
         for cid in cluster_ids:
             idx = (km.labels_ == cid)
-            means.append((cid, float(d2_all[nb][idx].mean())))
-        # sort by mean d2
-        means.sort(key=lambda t: t[1])
-        ordered = [cid for cid, _ in means]  # low -> high
-        label_map = {}
-        for cid, name in zip(ordered, ["OK", "Warning", "Error"]):
-            label_map[cid] = name
-        self.kmeans_label_map_ = label_map
+            means.append((cid, float(d2_nb[idx].mean())))
+        means.sort(key=lambda t: t[1])          # low -> high distance
+        ordered = [cid for cid, _ in means]
+        self.kmeans_label_map_ = {cid: name for cid, name in zip(ordered, ["OK", "Warning", "Error"])}
 
+    # -------------------- main API --------------------
     def fit(self, df: pd.DataFrame):
+        """
+        Fit scaler+PCA on df (so new data can be projected consistently),
+        fit baseline covariance on the baseline subset,
+        compute thresholds (always) and optionally fit KMeans on non-baseline.
+        """
         self.feature_cols_ = self._select_feature_cols(df)
+        if len(self.feature_cols_) == 0:
+            raise ValueError("No numeric feature columns found to train on.")
         X = df[self.feature_cols_].to_numpy()
         baseline_mask = (df[self.config.baseline_col] == self.config.baseline_value).to_numpy()
 
@@ -175,13 +191,15 @@ class PCAMahalanobisClassifier:
 
         # distances for all (used by both modes)
         d2_all = self._mahalanobis_d2(Z_all)
+
+        # thresholds: ALWAYS compute (makes fallback safe)
         self._set_thresholds(d2_baseline=d2_all[baseline_mask])
 
         # KMeans path (optional)
         if self.config.cluster_mode == "kmeans":
             self._fit_kmeans(Z_all, d2_all, baseline_mask)
 
-        # Cache for transform/predict
+        # Cache for predict fallback
         self._Z_all_fit_cache_ = Z_all
         self._d2_all_fit_cache_ = d2_all
         self._baseline_mask_fit_cache_ = baseline_mask
@@ -206,7 +224,9 @@ class PCAMahalanobisClassifier:
         labels[baseline_mask] = "Baseline"
 
         nb = ~baseline_mask
-        if self.config.cluster_mode == "kmeans" and self.kmeans_ is not None and nb.sum() > 0:
+        use_kmeans = (self.config.cluster_mode == "kmeans" and self.kmeans_ is not None and nb.sum() > 0)
+
+        if use_kmeans:
             if self.config.kmeans_space == "distance":
                 Xkm = d2[nb].reshape(-1, 1)
             else:
@@ -215,7 +235,14 @@ class PCAMahalanobisClassifier:
             mapped = [self.kmeans_label_map_.get(r, "Warning") for r in raw]
             labels[nb] = mapped
         else:
-            # Threshold mode
+            # Threshold path (fallback-safe): ensure thresholds are set
+            if (self.t_ok_ is None or self.t_warn_ is None):
+                if self._d2_all_fit_cache_ is not None and self._baseline_mask_fit_cache_ is not None:
+                    d2_base = self._d2_all_fit_cache_[self._baseline_mask_fit_cache_]
+                    self._set_thresholds(d2_baseline=d2_base)
+                else:
+                    raise RuntimeError("Thresholds unset and no cached baseline distances available.")
+
             labels[nb & (d2 <= self.t_ok_)] = "OK"
             labels[nb & (d2 > self.t_ok_) & (d2 <= self.t_warn_)] = "Warning"
             labels[nb & (d2 > self.t_warn_)] = "Error"
@@ -223,6 +250,11 @@ class PCAMahalanobisClassifier:
         return pd.Series(labels, index=df.index, name="State")
 
     def fit_predict(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Convenience for fitting and predicting on the SAME dataset.
+        Use this ONLY for the dataset you fit on (e.g., for diagnostics).
+        Do NOT use this for new monitoring data.
+        """
         self.fit(df)
         res = self.transform(df)
         res["State"] = self.predict(df)
@@ -238,33 +270,76 @@ class PCAMahalanobisClassifier:
                             index=[f"PC{i+1}" for i in range(self.k_)])
 
 
-
-# ============== Example Usage =================
-# Suppose the DataFrame is 'df' with:
-# - numeric feature columns
-# - a column 'label' that equals 'baseline' for baseline rows (change in config if needed)
+# ================= Example Usage (baseline vs monitoring) =================
+# Assumptions:
+# - Your DataFrame has numeric feature columns + a 'label' column
+#   where 'baseline' marks the healthy reference period.
+#
+# Workflow:
+#   1) Fit ONLY on baseline data (establish scaler, PCA basis, and baseline covariance).
+#   2) Score NEW/monitoring data with transform() / predict().
 
 if __name__ == '__main__':
-    df = pd.DataFrame()
+    # --- Example placeholders (replace with your actual DataFrames) ---
+    # df_all should have numeric feature columns + 'label'
+    # Let's mock a tiny example so the script is runnable:
+    rng = np.random.default_rng(0)
+    n_base = 200
+    n_new  = 300
+
+    # 5 numeric features; baseline ~ N(0,1), new ~ shifted
+    X_base = rng.normal(0, 1.0, size=(n_base, 5))
+    X_new  = rng.normal(0.4, 1.2, size=(n_new, 5))  # pretend "drifted" distribution
+
+    df_baseline = pd.DataFrame(X_base, columns=[f"f{i}" for i in range(5)])
+    df_baseline["label"] = "baseline"
+
+    df_new = pd.DataFrame(X_new, columns=[f"f{i}" for i in range(5)])
+    df_new["label"] = "monitor"   # anything != "baseline" is treated as non-baseline
+
+    # 1) Configure classifier
     cfg = PCAMahalanobisConfig(
-        n_components=None,      # auto-select k to reach var_target
+        n_components=3,          # or None for variance target
         var_target=0.95,
         standardize=True,
-        robust=True,            # MinCovDet for baseline covariance
+        robust=True,             # MinCovDet for baseline covariance
         q_ok=0.90,
         q_warn=0.99,
         baseline_col="label",
         baseline_value="baseline",
-        feature_cols=None       # infer numeric columns except 'label'; or pass an explicit list
+        feature_cols=None,       # infer numeric cols (excl. 'label')
+        cluster_mode="threshold",# or "kmeans"
+        kmeans_space="scores",
+        random_state=0
     )
 
     clf = PCAMahalanobisClassifier(cfg)
-    result = clf.fit_predict(df)
 
-    # 'result' includes PC scores, md2 (squared Mahalanobis), md, and 'State' in {"Baseline","OK","Warning","Error"}.
-    # Example:
-    print(clf.thresholds())     # (t_ok, t_warn) on chi-square d^2 scale
-    print(result[["md2","State"]].head())
+    # 2) Fit ONLY on baseline
+    clf.fit(df_baseline)
 
-    # If you need the PCA loadings:
-    loadings = clf.components_()
+    # (Optional) Inspect thresholds
+    print("Thresholds (d^2):", clf.thresholds())
+
+    # 3) Score monitoring data
+    res_new = clf.transform(df_new)      # contains PC1..PCk, md2, md
+    res_new["State"] = clf.predict(df_new)
+    scored_new = df_new.join(res_new[["md2", "md", "State"]])
+    print(scored_new["State"].value_counts())
+
+    # ================= If you prefer KMeans mode =================
+    # Just re-configure and refit on the SAME baseline; then predict on df_new:
+    cfg_km = PCAMahalanobisConfig(
+        n_components=3,
+        standardize=True,
+        robust=True,
+        baseline_col="label",
+        baseline_value="baseline",
+        cluster_mode="kmeans",    # <-- enable kmeans
+        kmeans_space="scores",
+        random_state=0
+    )
+    clf_km = PCAMahalanobisClassifier(cfg_km).fit(df_baseline)
+    res_new_km = clf_km.transform(df_new)
+    res_new_km["State"] = clf_km.predict(df_new)
+    print("KMeans States:\n", res_new_km["State"].value_counts())

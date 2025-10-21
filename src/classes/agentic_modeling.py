@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-import warnings
+import warnings, time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -9,11 +9,15 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 )
-from sklearn.svm import SVC
-from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.utils.multiclass import type_of_target
+
+# Models
+from sklearn.svm import SVC, LinearSVC
+from sklearn.linear_model import SGDClassifier
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.neural_network import MLPClassifier
 
 # XGBoost is optional
 try:
@@ -22,20 +26,24 @@ try:
 except Exception:
     print("XGBoost Unavailable!")
     _HAVE_XGB = False
+
+# Torch
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, random_split
+
 import optuna
-import time
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+N_MAX_FOR_KERNEL = 1000  # gate for kernel SVC on large datasets
+
 
 # =====================================
-# 1. PyTorch ANN wrapper
+# 1. PyTorch ANN wrapper (bounded + prune-able)
 # =====================================
 class TorchANN(nn.Module):
-    def __init__(self, input_dim, hidden_sizes=(128,64), dropout=0.2, num_classes=2):
+    def __init__(self, input_dim, hidden_sizes=(128, 64), dropout=0.2, num_classes=2):
         super().__init__()
         layers, prev = [], input_dim
         for h in hidden_sizes:
@@ -47,6 +55,7 @@ class TorchANN(nn.Module):
         self.num_classes = num_classes
     def forward(self, x): return self.net(x)
 
+
 class TorchANNClassifier:
     """
     Sklearn-like wrapper with:
@@ -57,7 +66,7 @@ class TorchANNClassifier:
     """
     def __init__(self,
                  input_dim=None,
-                 hidden_sizes=(128,64),
+                 hidden_sizes=(128, 64),
                  dropout=0.2,
                  lr=1e-3,
                  batch_size=128,
@@ -82,8 +91,8 @@ class TorchANNClassifier:
         self.num_classes = num_classes
         self.device = device
         self.num_workers = int(num_workers)
-        self.pin_memory = bool(pin_memory) if pin_memory is not None else (self.device=="cuda")
-        self.use_amp = bool(use_amp) if use_amp is not None else (self.device=="cuda")
+        self.pin_memory = bool(pin_memory) if pin_memory is not None else (self.device == "cuda")
+        self.use_amp = bool(use_amp) if use_amp is not None else (self.device == "cuda")
         self.max_seconds_per_fit = max_seconds_per_fit
         self.verbose = verbose
 
@@ -130,7 +139,7 @@ class TorchANNClassifier:
         best_state = None
         patience_left = self.patience
 
-        for epoch in range(1, self.epochs+1):
+        for epoch in range(1, self.epochs + 1):
             self.model.train()
             ep_loss = 0.0
             for xb, yb in dl_tr:
@@ -169,7 +178,7 @@ class TorchANNClassifier:
                 # early stopping
                 if va_loss + 1e-7 < best_va:
                     best_va = va_loss
-                    best_state = {k: v.detach().cpu().clone() for k,v in self.model.state_dict().items()}
+                    best_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
                     patience_left = self.patience
                 else:
                     patience_left -= 1
@@ -180,7 +189,7 @@ class TorchANNClassifier:
 
                 # Optuna pruning
                 if trial is not None:
-                    trial.report(-va_loss, step=epoch)  # higher is better → use negative loss
+                    trial.report(-va_loss, step=epoch)  # higher is better → negative loss
                     if trial.should_prune():
                         raise optuna.TrialPruned()
 
@@ -197,7 +206,6 @@ class TorchANNClassifier:
         if best_state is not None:
             self.model.load_state_dict(best_state)
 
-        # sync to ensure no hidden CUDA work remains
         if self.device == "cuda":
             torch.cuda.synchronize()
 
@@ -218,6 +226,7 @@ class TorchANNClassifier:
 
     def predict(self, X):
         return np.argmax(self.predict_proba(X), axis=1)
+
 
 # ============== Metric classes ==============
 class ClfMetric:
@@ -266,62 +275,72 @@ class RocAucMetric(ClfMetric):
     average: Optional[str] = "weighted"  # only used for multi-class
     def __call__(self, y_true, y_pred, y_proba=None) -> float:
         if y_proba is None:
-            return 0.0  # no probability -> can't compute ROC AUC
+            return 0.0
         target_type = type_of_target(y_true)
         if target_type == "binary":
-            # y_proba can be (n_samples,) or (n_samples, 2)
             probs = y_proba[:, 1] if y_proba.ndim == 2 else y_proba
             return self.weight * roc_auc_score(y_true, probs)
         else:
-            # multi-class
             return self.weight * roc_auc_score(
                 y_true, y_proba, multi_class=self.multi_class, average=self.average
             )
+
 
 # ============== Objective ==============
 @dataclass
 class ObjectiveClassifier:
     metrics: List[ClfMetric]
     greater_is_better: bool = True
-
     def aggregate(self, scores: Dict[str, float]) -> float:
-        # sum of already weighted metrics
         total = float(sum(scores.values()))
         return total if self.greater_is_better else -total
 
+
 # =====================================
-# 2. Model Factory
+# 2. Model Factory (with SVC gating + linear fallbacks)
 # =====================================
 class ModelFactory:
     @staticmethod
-    def build(config, input_dim=None, num_classes=2):
+    def build(config, input_dim=None, num_classes=2, n_samples=None):
         mtype = config["model_type"]
         params = config.get("params", {}).copy()
 
         if mtype == "svc":
-            params.setdefault("probability", True)
+            # Gate kernel SVC for large datasets; use LinearSVC + calibration instead
+            if n_samples is not None and n_samples > N_MAX_FOR_KERNEL:
+                base = LinearSVC(C=params.get("C", 1.0), max_iter=params.get("max_iter", 5000))
+                clf = CalibratedClassifierCV(base, method="sigmoid", cv=3)
+                return Pipeline([("scaler", StandardScaler()), ("linsvc", clf)])
+            # Keep probability=False for speed; use decision_function for ROC-AUC
+            params.setdefault("probability", False)
             base = SVC(**params)
             return Pipeline([("scaler", StandardScaler()), ("svc", base)])
+
+        elif mtype == "linear_svc":
+            base = LinearSVC(C=params.get("C", 1.0), max_iter=params.get("max_iter", 5000))
+            clf = CalibratedClassifierCV(base, method="sigmoid", cv=3)
+            return Pipeline([("scaler", StandardScaler()), ("linsvc", clf)])
+
+        elif mtype == "sgd":
+            base = SGDClassifier(**params)
+            return Pipeline([("scaler", StandardScaler()), ("sgd", base)])
 
         elif mtype == "mlp":
             base = MLPClassifier(**params)
             return Pipeline([("scaler", StandardScaler()), ("mlp", base)])
 
         elif mtype == "torch":
-            # Use PyTorch ANN
-            params.setdefault("hidden_sizes", (128, 64))
-            params.setdefault("dropout", 0.2)
-            params.setdefault("lr", 1e-3)
-            params.setdefault("batch_size", 64)
-            params.setdefault("epochs", 30)
             return TorchANNClassifier(
                 input_dim=input_dim,
-                hidden_sizes=params["hidden_sizes"],
-                dropout=params["dropout"],
-                lr=params["lr"],
-                batch_size=params["batch_size"],
-                epochs=params["epochs"],
+                hidden_sizes=params.get("hidden_sizes", (128, 64)),
+                dropout=params.get("dropout", 0.2),
+                lr=params.get("lr", 1e-3),
+                batch_size=params.get("batch_size", 64),
+                epochs=params.get("epochs", 30),
                 num_classes=num_classes,
+                max_seconds_per_fit=params.get("max_seconds_per_fit", None),
+                patience=params.get("patience", 8),
+                verbose=params.get("verbose", 1),
             )
 
         elif mtype == "xgb":
@@ -334,23 +353,35 @@ class ModelFactory:
         else:
             raise ValueError(f"Unknown model_type {mtype}")
 
+
 # =====================================
 # 3. Model Sampler for Optuna
 # =====================================
 class ModelSampler:
     @staticmethod
     def sample(trial, use_torch=True):
-        models = ["svc", "mlp", "xgb"]
+        choices = ["svc", "linear_svc", "sgd", "mlp", "xgb"]
         if use_torch and DEVICE == "cuda":
-            models.append("torch")
-        model_type = trial.suggest_categorical("model_type", models)
+            choices.append("torch")
+        model_type = trial.suggest_categorical("model_type", choices)
         params = {}
 
         if model_type == "svc":
             params["C"] = trial.suggest_float("svc_C", 1e-3, 1e3, log=True)
             params["kernel"] = trial.suggest_categorical("svc_kernel", ["rbf", "poly"])
             params["gamma"] = trial.suggest_float("svc_gamma", 1e-4, 1.0, log=True)
-            params["class_weight"] = trial.suggest_categorical("svc_cw", [None, "balanced"])
+            # keep probability False; we use decision_function
+
+        elif model_type == "linear_svc":
+            params["C"] = trial.suggest_float("linsvc_C", 1e-3, 1e3, log=True)
+            params["max_iter"] = trial.suggest_int("linsvc_max_iter", 2000, 10000)
+
+        elif model_type == "sgd":
+            params["loss"] = trial.suggest_categorical("sgd_loss", ["hinge", "log_loss"])
+            params["alpha"] = trial.suggest_float("sgd_alpha", 1e-6, 1e-2, log=True)
+            params["penalty"] = trial.suggest_categorical("sgd_penalty", ["l2", "l1", "elasticnet"])
+            params["max_iter"] = trial.suggest_int("sgd_max_iter", 1000, 5000)
+            params["early_stopping"] = True
 
         elif model_type == "mlp":
             params["hidden_layer_sizes"] = trial.suggest_categorical("mlp_hidden", [(128,), (64, 64), (128, 64)])
@@ -365,13 +396,19 @@ class ModelSampler:
             params["lr"] = trial.suggest_float("torch_lr", 1e-4, 1e-2, log=True)
             params["batch_size"] = trial.suggest_categorical("torch_batch", [32, 64, 128])
             params["epochs"] = trial.suggest_int("torch_epochs", 20, 80)
+            params["patience"] = trial.suggest_int("torch_patience", 5, 12)
+            params["max_seconds_per_fit"] = trial.suggest_int("torch_fit_seconds", 20, 90)
+            params["verbose"] = 1
 
         elif model_type == "xgb":
-            params["n_estimators"] = trial.suggest_int("xgb_n", 100, 400)
-            params["max_depth"] = trial.suggest_int("xgb_depth", 3, 8)
+            params["n_estimators"] = trial.suggest_int("xgb_n", 100, 600)
+            params["max_depth"] = trial.suggest_int("xgb_depth", 3, 10)
             params["learning_rate"] = trial.suggest_float("xgb_lr", 1e-3, 0.3, log=True)
+            params["subsample"] = trial.suggest_float("xgb_subsample", 0.6, 1.0)
+            params["colsample_bytree"] = trial.suggest_float("xgb_colsample", 0.6, 1.0)
 
         return {"model_type": model_type, "params": params}
+
 
 # ============== Cross-validated evaluation ==============
 @dataclass
@@ -384,16 +421,14 @@ class CVEvaluator:
         # Try predict_proba, else decision_function
         if hasattr(estimator, "predict_proba"):
             proba = estimator.predict_proba(X)
-            # Some estimators return shape (n_samples,) for binary; unify to (n,2)
             if proba.ndim == 1:
                 proba = np.vstack([1 - proba, proba]).T
             return proba
         if hasattr(estimator, "decision_function"):
             dec = estimator.decision_function(X)
-            # map decision scores to probabilities with a sigmoid-like scaling
-            # Here, we simply return scores; roc_auc can accept scores
+            # roc_auc_score accepts scores
             if dec.ndim == 1:
-                dec = dec.reshape(-1, 1)
+                dec = np.vstack([-(dec), dec]).T  # map to 2-column "score" style
             return dec
         return None
 
@@ -409,29 +444,33 @@ class CVEvaluator:
 
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                est = estimator  # rebuild fresh each fold if pipeline with internal state?
-                # Rebuild to avoid state leakage between folds
+                cfg = {"model_type": estimator["__model_type__"], "__params__": estimator["__params__"]}
+                # rebuild per fold
                 est = ModelFactory.build({"model_type": estimator["__model_type__"],
                                           "params": estimator["__params__"]},
-                                         random_state=self.random_state)
-                est.fit(Xtr, ytr)
+                                         input_dim=X.shape[1],
+                                         num_classes=len(np.unique(y)),
+                                         n_samples=Xtr.shape[0])
+                # If torch, allow pruning/time limits via params if present
+                if isinstance(est, TorchANNClassifier):
+                    est.fit(Xtr, ytr)  # cannot pass trial here; used only in StudyRunner
+                else:
+                    est.fit(Xtr, ytr)
+
             y_pred = est.predict(Xva)
             y_proba = self._get_proba(est, Xva)
 
-            # compute all metrics
             fold_scores: Dict[str, float] = {}
             for m in objective.metrics:
                 val = m(yva, y_pred, y_proba)
                 fold_scores[m.name] = fold_scores.get(m.name, 0.0) + float(val)
-
-            # accumulate
             for k, v in fold_scores.items():
                 metric_sums[k] = metric_sums.get(k, 0.0) + v
 
-        # average across folds
         metric_avgs = {k: v / nfolds for k, v in metric_sums.items()}
         aggregate = objective.aggregate(metric_avgs)
         return aggregate, metric_avgs
+
 
 # ============== Study runner (Optuna) ==============
 class StudyRunner:
@@ -442,55 +481,77 @@ class StudyRunner:
         self.best_metrics: Optional[Dict[str, float]] = None
         self.best_score: Optional[float] = None
 
-    def optuna_objective(trial, X, y, weights, n_splits=5):
+    def optuna_objective(self, trial, X, y, weights, n_splits=5):
+        # sample config
         cfg = ModelSampler.sample(trial, use_torch=True)
+        trial.set_user_attr("config", cfg)
+
+        # cross-validate (with prune support for torch)
         kf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
         scores = []
         for tr_idx, va_idx in kf.split(X, y):
             Xtr, Xva = X[tr_idx], X[va_idx]
             ytr, yva = y[tr_idx], y[va_idx]
 
-            if cfg["model_type"] == "torch" and DEVICE == "cuda":
-                # bounded, prune-able fit
-                model = TorchANNClassifier(
-                    input_dim=X.shape[1], num_classes=len(np.unique(y)),
-                    epochs=60, patience=8, max_seconds_per_fit=45, verbose=1
-                )
-                model.fit(Xtr, ytr, trial=trial)
-            else:
-                model = ModelFactory.build(cfg, input_dim=X.shape[1], num_classes=len(np.unique(y)))
-                model.fit(Xtr, ytr)
+            est = ModelFactory.build(cfg, input_dim=X.shape[1], num_classes=len(np.unique(y)), n_samples=Xtr.shape[0])
 
-            y_pred = model.predict(Xva)
-            y_proba = model.predict_proba(Xva)
+            if isinstance(est, TorchANNClassifier) and DEVICE == "cuda":
+                est.fit(Xtr, ytr, trial=trial)
+            else:
+                est.fit(Xtr, ytr)
+
+            y_pred = est.predict(Xva)
+            # probabilities or decision scores
+            if hasattr(est, "predict_proba"):
+                y_proba = est.predict_proba(Xva)
+            elif hasattr(est, "decision_function"):
+                dec = est.decision_function(Xva)
+                if dec.ndim == 1:
+                    y_proba = np.vstack([-(dec), dec]).T
+                else:
+                    y_proba = dec
+            else:
+                y_proba = None
+
             m = {
                 "accuracy": accuracy_score(yva, y_pred),
                 "precision": precision_score(yva, y_pred, zero_division=0),
                 "recall": recall_score(yva, y_pred, zero_division=0),
                 "f1": f1_score(yva, y_pred, zero_division=0),
-                "roc_auc": roc_auc_score(yva, y_proba[:,1]) if y_proba is not None else 0.0
+                "roc_auc": roc_auc_score(yva, y_proba[:, 1]) if y_proba is not None else 0.0
             }
-            scores.append(sum(m[k]*weights.get(k,1.0) for k in m))
+            scores.append(sum(m[k] * weights.get(k, 1.0) for k in m))
+
         return float(np.mean(scores))
 
-    def run(self, X: np.ndarray, y: np.ndarray, weights:dict, n_trials: int = 50, direction: str = "maximize", seed: int = 0):
-        import optuna
-        study = optuna.create_study(direction=direction, sampler=optuna.samplers.TPESampler(seed=seed), pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=5))
-        study.optimize(lambda t: self.optuna_objective(t, X, y,weights=weights, n_splits=5), n_trials=n_trials)
+    def run(self, X: np.ndarray, y: np.ndarray, weights: dict,
+            n_trials: int = 50, direction: str = "maximize", seed: int = 0):
+        study = optuna.create_study(
+            direction=direction,
+            sampler=optuna.samplers.TPESampler(seed=seed),
+            pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=5)
+        )
+        study.optimize(lambda t: self.optuna_objective(t, X, y, weights=weights, n_splits=self.cv.n_splits),
+                       n_trials=n_trials)
 
+        # store best
         self.best_config = study.best_trial.user_attrs["config"]
-        self.best_metrics = {k.replace("metric_", ""): v for k, v in study.best_trial.user_attrs.items() if k.startswith("metric_")}
         self.best_score = study.best_value
+        # (optional) aggregate metrics per-trial if you want; currently we just keep the weighted score
         return study
+
 
 # ============== Best model wrapper ==============
 class BestModel:
     def __init__(self, config: Dict[str, Any], random_state: int = 0):
         self.config = config
         self.random_state = random_state
-        self.estimator = ModelFactory.build(config, random_state=random_state)
+        self.estimator = None
 
     def fit(self, X: np.ndarray, y: np.ndarray):
+        self.estimator = ModelFactory.build(self.config, input_dim=X.shape[1],
+                                            num_classes=len(np.unique(y)), n_samples=X.shape[0])
+        # Torch model already contains scaler; others include scaler in pipeline
         self.estimator.fit(X, y)
         return self
 
@@ -503,12 +564,13 @@ class BestModel:
         if hasattr(self.estimator, "decision_function"):
             dec = self.estimator.decision_function(X)
             if dec.ndim == 1:
-                dec = dec.reshape(-1, 1)
+                return np.vstack([-(dec), dec]).T
             return dec
         return None
 
+
 # =====================================
-# 4. Evaluation Objective
+# 4. Evaluation helpers (standalone)
 # =====================================
 def classification_objective(y_true, y_pred, y_proba):
     return {
@@ -522,32 +584,42 @@ def classification_objective(y_true, y_pred, y_proba):
 def weighted_score(metrics: dict, weights: dict):
     return sum(metrics[k] * weights.get(k, 1.0) for k in metrics)
 
+
 # =====================================
-# 5. Optuna-compatible Objective
+# 5. Standalone Optuna objective (if you prefer the function style)
 # =====================================
 def optuna_objective(trial, X, y, weights=None, n_splits=5):
-    from sklearn.model_selection import StratifiedKFold
     weights = weights or {"accuracy": 1, "precision": 1, "recall": 1, "f1": 1, "roc_auc": 1}
-
-    cfg = ModelSampler.sample(trial)
-    mtype = cfg["model_type"]
-    params = cfg["params"]
+    cfg = ModelSampler.sample(trial, use_torch=True)
+    trial.set_user_attr("config", cfg)
 
     kf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
     fold_scores = []
-
     for train_idx, test_idx in kf.split(X, y):
         Xtr, Xte = X[train_idx], X[test_idx]
         ytr, yte = y[train_idx], y[test_idx]
 
-        if mtype == "torch":
-            model = ModelFactory.build(cfg, input_dim=X.shape[1], num_classes=len(np.unique(y)))
-        else:
-            model = ModelFactory.build(cfg)
+        model = ModelFactory.build(cfg, input_dim=X.shape[1],
+                                   num_classes=len(np.unique(y)),
+                                   n_samples=Xtr.shape[0])
 
-        model.fit(Xtr, ytr)
+        if isinstance(model, TorchANNClassifier) and DEVICE == "cuda":
+            model.fit(Xtr, ytr, trial=trial)
+        else:
+            model.fit(Xtr, ytr)
+
         y_pred = model.predict(Xte)
-        y_proba = model.predict_proba(Xte)
+        if hasattr(model, "predict_proba"):
+            y_proba = model.predict_proba(Xte)
+        elif hasattr(model, "decision_function"):
+            dec = model.decision_function(Xte)
+            if dec.ndim == 1:
+                y_proba = np.vstack([-(dec), dec]).T
+            else:
+                y_proba = dec
+        else:
+            y_proba = None
+
         metrics = classification_objective(yte, y_pred, y_proba)
         fold_scores.append(weighted_score(metrics, weights))
 
@@ -558,15 +630,28 @@ def optuna_objective(trial, X, y, weights=None, n_splits=5):
 # 6. Example Usage
 # =====================================
 """
-import optuna
+# Option A: class runner
+obj = ObjectiveClassifier([
+    AccuracyMetric(1.0), PrecisionMetric(1.0), RecallMetric(1.0),
+    F1Metric(1.0), RocAucMetric(1.0)
+])
+cv = CVEvaluator(n_splits=5)
+runner = StudyRunner(objective=obj, cv=cv)
 
 X, y = ...  # numpy arrays
 weights = {"accuracy": 0.3, "precision": 0.2, "recall": 0.2, "f1": 0.2, "roc_auc": 0.1}
+study = runner.run(X, y, weights=weights, n_trials=50, direction="maximize", seed=42)
+print("Best score:", runner.best_score)
+print("Best config:", runner.best_config)
 
-study = optuna.create_study(direction="maximize")
+final_model = BestModel(runner.best_config).fit(X, y)
+yhat = final_model.predict(X_test)
+yproba = final_model.predict_proba(X_test)
+
+# Option B: functional objective
+study = optuna.create_study(direction="maximize",
+                            pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=5))
 study.optimize(lambda t: optuna_objective(t, X, y, weights, n_splits=5), n_trials=50)
-
-print("Best score:", study.best_value)
-print("Best config:", study.best_trial.params)
-cfg = study.best_trial.user_attrs if "config" in study.best_trial.user_attrs else None
+print("Best score (func):", study.best_value)
+print("Best config (func):", study.best_trial.user_attrs["config"])
 """

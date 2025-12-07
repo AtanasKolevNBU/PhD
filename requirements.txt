@@ -1,0 +1,13 @@
+# requirements.txt
+# Core scientific stack
+numpy
+pandas
+scipy
+matplotlib
+scikit-learn
+
+# GUI (tkinter is usually preinstalled on Linux; include for completeness)
+tk
+
+# No need to list these – they are built into Python:
+# typing, dataclasses, random, math, time, queue, threading, sys, os

@@ -14,7 +14,6 @@ import tkinter as tk
 from tkinter import ttk
 
 
-
 # ============= CONFIG ==================
 
 SAMPLE_RATE_HZ = 12000          # simulated sensor sample rate

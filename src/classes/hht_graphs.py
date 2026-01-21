@@ -133,8 +133,8 @@ def plot_imfs_compare_three(x1, t1, imfs1, res1,
             ax.plot(t2, res2, alpha=0.9, lw=0.9, color="C1")
         if have3 and res3 is not None:
             ax.plot(t3, res3, alpha=0.9, lw=0.9, color="C2")
-        ax.set_ylabel("Остатък", fontsize=16)
-        ax.set_xlabel("Време, s", fontsize=16)
+        ax.set_ylabel("Residual", fontsize=16)
+        ax.set_xlabel("Time, s", fontsize=16)
         ax.tick_params(axis='both', labelsize=14)
 
     fig.tight_layout()

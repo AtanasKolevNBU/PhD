@@ -1,13 +1,14 @@
 import numpy as np
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
+import matplotlib.pyplot as plt
 
 class Cepstrum:
 
     def __init__(self):
         pass
 
-    def cepstrum_calculation(signal):
+    def cepstrum_calculation(self, signal):
         spectrum = np.fft.fft(signal)
         log_spectrum = np.log(np.abs(spectrum) + np.finfo(float).eps)
         cepstrum = np.fft.ifft(log_spectrum).real
@@ -17,7 +18,7 @@ class Cepstrum:
 
         return cepstrum, log_spectrum, freqs, quefrencies
     
-    def cepstrum_visualizer(self, signal, name):
+    def cepstrum_visualizer_plotly(self, signal, name):
         signal_cepstrum, signal_log_spectrum, signal_freq, signal_quefreq = self.cepstrum_calculation(signal)
         lifter = np.ones_like(signal_cepstrum)
         lifter[:30] = 0
@@ -44,3 +45,76 @@ class Cepstrum:
         fig.update_layout(height=800, width=1500, title_text='Сигнал, Log спектър и Cepstrum')
 
         return fig
+    
+    def plot_signal_and_cepstrum(self,
+        x: np.ndarray,
+        fs: float,
+        global_title:str = 'Cepstrum-based analysis of vibration signal',
+        title_signal: str = "Raw signal (time domain)",
+        title_cepstrum: str = "Real cepstrum (quefrency domain)",
+        quef_max_s: float | None = None,
+        min_quef_s: float = 1e-3,
+        y_lim_bottom: float = -0.2,
+        y_lim_top:float = 0.2
+    ) -> None:
+        """
+        Plot raw signal and its cepstrum in two stacked subplots.
+
+        Parameters
+        ----------
+        x : np.ndarray
+            1D time-domain signal.
+        fs : float
+            Sampling frequency [Hz].
+        quef_max_s : float | None
+            If set, limit cepstrum x-axis to [0, quef_max_s] seconds.
+            Useful to focus on physically meaningful quefrency range.
+        """
+        x = np.asarray(x, dtype=float).ravel()
+        n = x.size
+        if n < 2:
+            raise ValueError("Signal must have at least 2 samples.")
+        if fs <= 0:
+            raise ValueError("fs must be > 0.")
+
+        t = np.arange(n) / fs
+        c, _, _, quefrencies = self.cepstrum_calculation(x)
+
+        q = quefrencies
+
+        fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=False)
+        fig.suptitle(global_title, fontsize=18)
+
+        # --- Subplot 1: raw signal ---
+        axes[0].plot(t, x)
+        axes[0].set_title(title_signal, fontsize=16)
+        axes[0].set_xlabel("Time [s]", fontsize=14)
+        axes[0].set_ylabel("Amplitude", fontsize=14)
+        axes[0].tick_params(labelsize=12)
+        axes[0].grid(True)
+
+        # --- Subplot 2: cepstrum ---
+        if quef_max_s is not None:
+            if quef_max_s <= 0:
+                raise ValueError("quef_max_s must be > 0.")
+            max_idx = int(min(n, np.floor(quef_max_s * fs)))
+            max_idx = max(max_idx, 2)  # keep at least a couple points
+            q_plot = q[:max_idx]
+            c_plot = c[:max_idx]
+        else:
+            half_n = n // 2
+            q_plot = q[:half_n]
+            c_plot = c[:half_n]
+        print(q_plot.shape)
+        print(c_plot.shape)
+
+        axes[1].plot(q_plot, c_plot)
+        axes[1].set_title(title_cepstrum, fontsize=16)
+        axes[1].set_xlabel("Quefrency [s]", fontsize=14)
+        axes[1].set_ylabel("Cepstrum amplitude", fontsize=14)
+        axes[1].set_ylim(bottom = y_lim_bottom, top = y_lim_top)
+        axes[1].tick_params(labelsize=12)
+        axes[1].grid(True)
+
+        fig.tight_layout()
+        plt.show()
